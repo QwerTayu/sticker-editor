@@ -1,0 +1,877 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sticker Layout Editor</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --text: #1d2433; --muted: #667085; --line: #d9dde5;
+    --accent: #0A2D92; --on-accent: #ffffff; --accent-soft: #e6ecfa; --danger: #d92d20; --check-a: #ffffff; --check-b: #d9d9d9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14171d; --panel: #1d2129; --text: #e7eaf0; --muted: #98a2b3; --line: #2f3542;
+      --accent: #8fa8ff; --on-accent: #0d1430; --accent-soft: #232c45; --danger: #ff6b5e; --check-a: #3a3d44; --check-b: #2c2f35;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  .app { display: grid; grid-template-columns: 1fr 320px; gap: 16px; padding: 16px; min-height: 100vh; }
+  @media (max-width: 900px) { .app { grid-template-columns: 1fr; } }
+  /* 透明な部分は市松模様で見せる（書き出した PNG の背景と同じく透明） */
+  .stage { background: repeating-conic-gradient(var(--check-b) 0 25%, var(--check-a) 0 50%) 0 0 / 24px 24px; border-radius: 10px; overflow: hidden; position: relative; align-self: start; }
+  canvas#view { display: block; width: 100%; height: auto; touch-action: none; cursor: default; }
+  .stage.drop { outline: 3px dashed var(--accent); outline-offset: -3px; }
+  .empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--muted); text-align: center; padding: 16px; pointer-events: none; }
+  .empty button { pointer-events: auto; }
+  input[type=file] { display: none; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; align-self: start; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  h2 { font-size: 13px; margin: 16px 0 6px; color: var(--muted); font-weight: 600; }
+  .hint { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
+  .layers { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .layers li { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-top: 1px solid var(--line); cursor: pointer; }
+  .layers li:first-child { border-top: 0; }
+  .layers li.sel { background: var(--accent-soft); font-weight: 600; }
+  .layers li .bad { color: var(--danger); font-size: 12px; margin-left: auto; }
+  .row { display: grid; grid-template-columns: 56px 1fr 64px; gap: 8px; align-items: center; margin: 6px 0; }
+  .row label { color: var(--muted); font-size: 12px; }
+  input[type=number] { width: 100%; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .btns { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+  button { padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); cursor: pointer; font: inherit; font-size: 13px; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  button:disabled { opacity: .4; cursor: default; }
+  .shapes { display: flex; gap: 4px; margin: 6px 0; }
+  .shapes label { flex: 1; text-align: center; border: 1px solid var(--line); border-radius: 6px; padding: 4px 0; cursor: pointer; font-size: 13px; }
+  .shapes input { display: none; }
+  .shapes label:has(input:checked) { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .check { display: flex; align-items: center; gap: 6px; margin: 6px 0; font-size: 13px; }
+  .status { font-size: 12px; margin: 6px 0; }
+  .status.ok { color: #12805c; } .status.ng { color: var(--danger); }
+  textarea { width: 100%; height: 150px; font: 12px/1.4 ui-monospace, Menlo, monospace; border: 1px solid var(--line); border-radius: 6px; padding: 6px; background: var(--bg); color: var(--text); }
+  .toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 6px 14px; border-radius: 6px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="stage" id="stage">
+    <canvas id="view"></canvas>
+    <div class="empty" id="empty">
+      <div>画像（PNG・JPEG・WebP・GIF）をここにドロップ<br>またはプロジェクトファイル（.json）をドロップ</div>
+      <button class="primary" id="addEmpty">画像を追加</button>
+    </div>
+  </div>
+  <div class="panel">
+    <h1>ステッカー配置エディタ</h1>
+    <p class="hint">画像を追加して、ドラッグで移動。選んだ画像は、ホイールで拡大縮小、Shift＋ホイールで回転。矢印キーで1px（Shift で10px）移動、Delete で削除。</p>
+    <div class="btns">
+      <button class="primary" id="add">画像を追加</button>
+      <input type="file" id="fileImg" accept="image/png,image/jpeg,image/webp,image/gif" multiple>
+      <input type="file" id="fileProj" accept=".json,application/json">
+    </div>
+
+    <h2>レイヤー（上ほど手前）</h2>
+    <ul class="layers" id="layers"></ul>
+    <div class="btns">
+      <button id="front">最前面</button><button id="up">↑ 前へ</button>
+      <button id="down">↓ 後ろへ</button><button id="back">最背面</button>
+    </div>
+
+    <h2>選択中：<span id="selname">—</span></h2>
+    <div class="row"><label>倍率</label><input type="range" id="scaleR" min="0.02" max="3" step="0.01"><input type="number" id="scaleN" min="0.01" max="10" step="0.01"></div>
+    <div class="row"><label>回転°</label><input type="range" id="rotR" min="-180" max="180" step="1"><input type="number" id="rotN" step="1"></div>
+    <div class="row"><label>X</label><span></span><input type="number" id="xN" step="1"></div>
+    <div class="row"><label>Y</label><span></span><input type="number" id="yN" step="1"></div>
+    <label class="check"><input type="checkbox" id="link">倍率を連動する（ここにチェックした画像どうし）</label>
+    <label class="check"><input type="checkbox" id="denoise">透過部分の細かいノイズを除去する</label>
+    <p class="hint">細い線（ケーブルなど）が消えるときは外してください。</p>
+    <div class="shapes" id="bodyModes">
+      <label><input type="radio" name="bodyMode" value="whole">重なり判定：全体</label>
+      <label><input type="radio" name="bodyMode" value="main">本体のみ</label>
+    </div>
+    <p class="hint">「本体のみ」は、一番大きい塊とそれより上の飾りだけを重なり判定に使います（下の風の線などは隠れてよい扱い）。</p>
+    <div class="btns">
+      <button id="dup">複製</button><button id="del">削除</button>
+    </div>
+
+    <h2>キャンバス</h2>
+    <div class="row"><label>幅 px</label><span></span><input type="number" id="canvasW" min="100" max="10000" step="10"></div>
+    <div class="row"><label>高さ px</label><span></span><input type="number" id="canvasH" min="100" max="10000" step="10"></div>
+
+    <h2>チェック・表示</h2>
+    <div class="status" id="overlap"></div>
+    <label class="check"><input type="checkbox" id="showBorder" checked>台紙（白い部分）を表示</label>
+    <label class="check"><input type="checkbox" id="showGrid">グリッドとステッカーの中心線を表示</label>
+    <div class="row" id="gridRow"><label>間隔 px</label><input type="range" id="gridR" min="25" max="500" step="25"><input type="number" id="gridN" min="10" max="2000" step="5"></div>
+    <div class="status" id="center"></div>
+    <div class="shapes" id="shapes">
+      <label><input type="radio" name="shape" value="contour">輪郭</label>
+      <label><input type="radio" name="shape" value="circle">円</label>
+      <label><input type="radio" name="shape" value="rect">長方形</label>
+      <label><input type="radio" name="shape" value="square">正方形</label>
+    </div>
+    <div id="sheetBox">
+      <div class="shapes">
+        <label><input type="radio" name="sheetMode" value="auto">自動</label>
+        <label><input type="radio" name="sheetMode" value="manual">手動</label>
+      </div>
+      <p class="hint" id="sheetHint"></p>
+      <div class="row"><label>中心 X</label><span></span><input type="number" id="sheetX" step="1"></div>
+      <div class="row"><label>中心 Y</label><span></span><input type="number" id="sheetY" step="1"></div>
+      <div class="row"><label id="sheetWLabel">幅</label><span></span><input type="number" id="sheetW" min="10" step="1"></div>
+      <div class="row" id="sheetHRow"><label>高さ</label><span></span><input type="number" id="sheetH" min="10" step="1"></div>
+      <div class="status ng" id="overflow"></div>
+    </div>
+    <div class="row" id="borderRow"><label>余白 px</label><input type="range" id="borderR" min="10" max="200" step="1"><input type="number" id="borderN" min="0" max="400" step="1"></div>
+    <div class="row" id="cornerRow"><label>角丸 px</label><input type="range" id="cornerR" min="0" max="400" step="1"><input type="number" id="cornerN" min="0" max="1000" step="1"></div>
+
+    <h2>書き出し</h2>
+    <div class="row"><label>横幅 cm</label><span></span><input type="number" id="widthCm" min="2" max="40" step="0.5"></div>
+    <div class="btns">
+      <button class="primary" id="copy">配置をコピー（Claude 用）</button>
+      <button class="primary" id="png">PNG を保存</button>
+    </div>
+    <textarea id="json" spellcheck="false"></textarea>
+    <div class="btns">
+      <button id="apply">テキストの配置を読み込む</button>
+    </div>
+    <h2>プロジェクト（画像ごと保存）</h2>
+    <p class="hint">配置のテキストには画像が入りません。画像も含めて保存・共有するときはプロジェクトファイルを使ってください。</p>
+    <div class="btns">
+      <button id="saveProj">プロジェクトを保存</button>
+      <button id="loadProj">プロジェクトを開く</button>
+      <button id="clear">すべて削除</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+// 台紙（とくに円）が作業キャンバスからはみ出しても切れないよう、周りに余白 M を取って計算・表示する
+const M = 500, DPI = 300, PAD = 30, ALPHA_T = 40;
+const STORE = 'sticker-editor-v1';
+let CW, CH, VW, VH;
+
+// ---------- state ----------
+// layout の各要素は { name, x, y, scale, rot, link }。name は assets のキー（画像ごとに一意）
+let layout = [];
+// sheet は台紙（輪郭以外）の手動指定：中心 x, y と幅 w・高さ h（円は直径、正方形は一辺で w = h）。キャンバス座標
+let settings = { canvas: [2500, 2400], border: 40, widthCm: 10, shape: 'contour', corner: 60, grid: false, gridStep: 100, sheetMode: 'auto', sheet: null };
+let sel = null;
+try {
+  const saved = JSON.parse(localStorage.getItem(STORE) || 'null');
+  if (saved && Array.isArray(saved.layout)) { layout = saved.layout; settings = { ...settings, ...saved.settings }; }
+} catch (e) {}
+const save = () => { try { localStorage.setItem(STORE, JSON.stringify({ layout, settings })); } catch (e) {} };
+
+// ---------- images ----------
+// assets[name] = { src（元画像の data URL）, opts: { denoise, body }, img, body, alpha, w, h }
+// img は透過部分を整えて切り抜いた画像、body は重なり判定に使う本体マスク、alpha はクリック判定用の画素
+const assets = {};
+const DEFAULT_OPTS = { denoise: true, body: 'whole' };
+function loadImg(src) { return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('画像を読み込めません')); i.src = src; }); }
+const readDataURL = file => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(file); });
+
+// 4近傍（scipy の既定の構造要素と同じ）での収縮・膨張。画像の外は 0 として扱う
+function morph(m, w, h, erode) {
+  const o = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    const l = x > 0 && m[i - 1], r = x < w - 1 && m[i + 1], u = y > 0 && m[i - w], d = y < h - 1 && m[i + w];
+    o[i] = erode ? (m[i] && l && r && u && d ? 1 : 0) : (m[i] || l || r || u || d ? 1 : 0);
+  }
+  return o;
+}
+function opening(m, w, h, n) {
+  for (let k = 0; k < n; k++) m = morph(m, w, h, true);
+  for (let k = 0; k < n; k++) m = morph(m, w, h, false);
+  return m;
+}
+// 本体マスク：一番大きい塊＋本体より上にある飾り（キラキラ・汗など）。本体の下にある風の線などは「隠れてよい」ので含めない
+function mainBody(m, w, h) {
+  const filled = fillHoles(m, w, h), lab = new Int32Array(w * h), size = [0], rowSum = [0], maxRow = [0], stack = [];
+  let n = 0;
+  for (let s = 0; s < lab.length; s++) {
+    if (!filled[s] || lab[s]) continue;
+    n++; size[n] = 0; rowSum[n] = 0; maxRow[n] = 0;
+    lab[s] = n; stack.push(s);
+    while (stack.length) {
+      const i = stack.pop(), x = i % w, y = (i / w) | 0;
+      size[n]++; rowSum[n] += y; if (y > maxRow[n]) maxRow[n] = y;
+      for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < h - 1 ? i + w : -1])
+        if (j >= 0 && filled[j] && !lab[j]) { lab[j] = n; stack.push(j); }
+    }
+  }
+  let main = 1;
+  for (let k = 2; k <= n; k++) if (size[k] > size[main]) main = k;
+  const keep = new Uint8Array(n + 1);
+  for (let k = 1; k <= n; k++) keep[k] = k === main || rowSum[k] / size[k] < maxRow[main] - 10;
+  const out = new Uint8Array(w * h);
+  for (let i = 0; i < out.length; i++) out[i] = keep[lab[i]];
+  return out;
+}
+// render_layout.py の load と同じ手順：不透明度 40 以下を透明にし、（必要なら）ノイズ除去して、中身の外接矩形で切り抜く
+async function prepare(src, opts) {
+  const im = await loadImg(src), W = im.naturalWidth, H = im.naturalHeight;
+  if (!W || !H) throw new Error('画像の大きさが読めません');
+  const c = new OffscreenCanvas(W, H), cx = c.getContext('2d');
+  cx.drawImage(im, 0, 0);
+  const id = cx.getImageData(0, 0, W, H), px = id.data;
+  let m = new Uint8Array(W * H);
+  for (let i = 0; i < m.length; i++) m[i] = px[i * 4 + 3] > ALPHA_T;
+  if (opts.denoise) m = opening(m, W, H, 2);
+  let x0 = W, y0 = H, x1 = -1, y1 = -1;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    if (!m[i]) { px[i * 4 + 3] = 0; continue; }
+    if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+  }
+  if (x1 < 0) throw new Error('不透明な部分がありません');
+  cx.putImageData(id, 0, 0);
+  const w = x1 - x0 + 1, h = y1 - y0 + 1;
+  const img = new OffscreenCanvas(w, h), ix = img.getContext('2d');
+  ix.drawImage(c, x0, y0, w, h, 0, 0, w, h);
+  let cm = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) cm[y * w + x] = m[(y + y0) * W + x + x0];
+  if (opts.body === 'main') cm = mainBody(cm, w, h);
+  return { img, body: maskCanvas({ m: cm, w, h }, [255, 0, 0, 255]), alpha: ix.getImageData(0, 0, w, h).data, w, h };
+}
+async function setAsset(name, src, opts, persist = true) {
+  opts = { ...DEFAULT_OPTS, ...opts };
+  assets[name] = { src, opts, ...(await prepare(src, opts)) };
+  if (persist) idbPut({ name, src, opts });
+}
+function removeAsset(name) { delete assets[name]; idbDel(name); }
+function uniqueName(base) {
+  base = base.trim().replace(/["\\\/]/g, '_') || 'image';
+  let name = base;
+  for (let k = 2; assets[name]; k++) name = `${base}-${k}`;
+  return name;
+}
+
+// 画像は大きいので localStorage ではなく IndexedDB に置く。使えない環境（プライベートウィンドウなど）では保存しないだけ
+let dbp = null;
+const db = () => dbp ||= new Promise((res, rej) => {
+  const r = indexedDB.open('sticker-editor', 1);
+  r.onupgradeneeded = () => r.result.createObjectStore('assets', { keyPath: 'name' });
+  r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+});
+async function idb(mode, fn) {
+  try {
+    const d = await db();
+    return await new Promise((res, rej) => {
+      const tx = d.transaction('assets', mode), req = fn(tx.objectStore('assets'));
+      tx.oncomplete = () => res(req && req.result); tx.onerror = () => rej(tx.error);
+    });
+  } catch (e) { return null; }
+}
+const idbPut = v => idb('readwrite', s => s.put(v));
+const idbDel = name => idb('readwrite', s => s.delete(name));
+
+function setCanvas(w, h) {
+  settings.canvas = [CW, CH] = [Math.max(100, Math.round(w)), Math.max(100, Math.round(h))];
+  VW = CW + 2 * M; VH = CH + 2 * M;
+  view.width = VW; view.height = VH;
+}
+async function init() {
+  setCanvas(...settings.canvas);
+  // 保存した画像を読み終えるまでは空のまま操作できるようにし、読み終えたら前回の配置を後ろ（奥）に戻す
+  const saved = layout;
+  layout = []; syncUI(); refresh();
+  for (const a of (await idb('readonly', s => s.getAll())) || []) {
+    if (assets[a.name]) continue;
+    try { await setAsset(a.name, a.src, a.opts, false); } catch (e) {}
+  }
+  layout = [...saved.filter(it => assets[it.name] && !layout.some(l => l.name === it.name)), ...layout];
+  syncUI(); refresh();
+}
+
+// 画像（複数可）やプロジェクトファイルを追加する。新しい画像はキャンバス中央に、キャンバスの半分程度の大きさで置く
+async function addFiles(files) {
+  for (const f of files) {
+    if (/\.json$/i.test(f.name) || f.type === 'application/json') { await loadProject(await f.text()); continue; }
+    if (!/^image\/(png|jpeg|webp|gif)$/.test(f.type)) { toast(`${f.name} は対応していない形式です`); continue; }
+    const name = uniqueName(f.name.replace(/\.[^.]+$/, ''));
+    try { await setAsset(name, await readDataURL(f), DEFAULT_OPTS); }
+    catch (e) { toast(`${f.name}：${e.message}`); continue; }
+    const a = assets[name], scale = +Math.min(1, 0.5 * Math.min(CW / a.w, CH / a.h)).toFixed(3);
+    const it = { name, x: Math.round(CW / 2), y: Math.round(CH / 2), scale, rot: 0, link: false };
+    layout.push(it); sel = it;
+  }
+  changed();
+}
+
+// ---------- geometry ----------
+// rot は PIL と同じく「正＝反時計回り」。canvas は時計回りが正なので符号を反転して使う
+function place(ctx, it, f = 1) {
+  ctx.translate(it.x * f, it.y * f);
+  ctx.rotate(-it.rot * Math.PI / 180);
+  ctx.scale(it.scale * f, it.scale * f);
+}
+function drawItem(ctx, it, src, f = 1) {
+  const d = assets[it.name];
+  ctx.save(); place(ctx, it, f); ctx.drawImage(src, -d.w / 2, -d.h / 2); ctx.restore();
+}
+function hit(px, py) {
+  for (let i = layout.length - 1; i >= 0; i--) {
+    const it = layout[i], d = assets[it.name];
+    const a = it.rot * Math.PI / 180, dx = px - it.x, dy = py - it.y;
+    const lx = (dx * Math.cos(a) - dy * Math.sin(a)) / it.scale + d.w / 2;
+    const ly = (dx * Math.sin(a) + dy * Math.cos(a)) / it.scale + d.h / 2;
+    if (lx < 0 || ly < 0 || lx >= d.w || ly >= d.h) continue;
+    if (d.alpha[(Math.floor(ly) * d.w + Math.floor(lx)) * 4 + 3] > ALPHA_T) return it;
+  }
+  return null;
+}
+
+// ---------- mask ops (Felzenszwalb の距離変換) ----------
+function edt1d(f, n, d, v, z) {
+  let k = 0; v[0] = 0; z[0] = -Infinity; z[1] = Infinity;
+  for (let q = 1; q < n; q++) {
+    let s;
+    while (true) {
+      s = ((f[q] + q * q) - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
+      if (s <= z[k]) { k--; } else break;
+    }
+    k++; v[k] = q; z[k] = s; z[k + 1] = Infinity;
+  }
+  k = 0;
+  for (let q = 0; q < n; q++) { while (z[k + 1] < q) k++; d[q] = (q - v[k]) ** 2 + f[v[k]]; }
+}
+function dist2(mask, w, h) { // mask が true の画素までの距離の2乗
+  const INF = 1e20, out = new Float64Array(w * h), n = Math.max(w, h);
+  const f = new Float64Array(n), d = new Float64Array(n), v = new Int32Array(n), z = new Float64Array(n + 1);
+  for (let x = 0; x < w; x++) {
+    for (let y = 0; y < h; y++) f[y] = mask[y * w + x] ? 0 : INF;
+    edt1d(f, h, d, v, z);
+    for (let y = 0; y < h; y++) out[y * w + x] = d[y];
+  }
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) f[x] = out[y * w + x];
+    edt1d(f, w, d, v, z);
+    for (let x = 0; x < w; x++) out[y * w + x] = d[x];
+  }
+  return out;
+}
+const dilate = (m, w, h, r) => { const d = dist2(m, w, h), o = new Uint8Array(w * h); for (let i = 0; i < o.length; i++) o[i] = d[i] <= r * r; return o; };
+const erode = (m, w, h, r) => { const inv = m.map(x => !x), d = dist2(inv, w, h), o = new Uint8Array(w * h); for (let i = 0; i < o.length; i++) o[i] = d[i] > r * r; return o; };
+function fillHoles(m, w, h) { // 外周からつながっていない空白を埋める
+  const out = new Uint8Array(w * h).fill(1), stack = [];
+  const push = i => { if (!m[i] && out[i]) { out[i] = 0; stack.push(i); } };
+  for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); }
+  for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
+  while (stack.length) {
+    const i = stack.pop(), x = i % w, y = (i / w) | 0;
+    if (x > 0) push(i - 1); if (x < w - 1) push(i + 1); if (y > 0) push(i - w); if (y < h - 1) push(i + w);
+  }
+  return out;
+}
+// 台紙の形。contour は Python 版と同じ手順（余白 r で膨張 → 2r でクロージング → 穴埋め）、
+// circle / rect / square は、自動なら autoSheet、手動なら settings.sheet の位置と大きさで描く
+function stickerMask(f) {
+  const w = Math.round(VW * f), h = Math.round(VH * f);
+  const c = new OffscreenCanvas(w, h), x = c.getContext('2d');
+  x.translate(M * f, M * f);
+  for (const it of layout) drawItem(x, it, assets[it.name].img, f);
+  const px = x.getImageData(0, 0, w, h).data;
+  let m = new Uint8Array(w * h);
+  for (let i = 0; i < m.length; i++) m[i] = px[i * 4 + 3] > ALPHA_T;
+  const r = settings.border * f, shape = settings.shape || 'contour';
+  if (shape === 'contour') {
+    m = fillHoles(m, w, h);
+    m = dilate(m, w, h, r);
+    m = erode(dilate(m, w, h, 2 * r), w, h, 2 * r);
+    return { m: fillHoles(m, w, h), w, h };
+  }
+  const auto = autoSheet(m, w, h, f, shape);
+  const g = settings.sheetMode === 'manual' && settings.sheet ? settings.sheet : auto;
+  const sc = new OffscreenCanvas(w, h), sx = sc.getContext('2d');
+  sx.fillStyle = '#fff'; sx.beginPath();
+  const cx = (g.x + M) * f, cy = (g.y + M) * f, gw = g.w * f, gh = g.h * f;
+  if (shape === 'circle') sx.arc(cx, cy, gw / 2, 0, 2 * Math.PI);
+  else sx.roundRect(cx - gw / 2, cy - gh / 2, gw, gh, Math.min(settings.corner * f, gw / 2, gh / 2));
+  sx.fill();
+  const sp = sx.getImageData(0, 0, w, h).data, out = new Uint8Array(w * h);
+  let overflow = false;
+  for (let i = 0; i < out.length; i++) { out[i] = sp[i * 4 + 3] > 127; if (m[i] && !out[i]) overflow = true; }
+  return { m: out, w, h, geom: g, auto, overflow };
+}
+// 自動のときの台紙（キャンバス座標）。円は最小包含円、長方形・正方形は外接矩形に、余白 border を足す
+function autoSheet(m, w, h, f, shape) {
+  const b = settings.border;
+  if (shape === 'circle') {
+    const k = minCircle(hull(m, w, h)), d = 2 * (k.r / f + b);
+    return { x: k.x / f - M, y: k.y / f - M, w: d, h: d };
+  }
+  let x0 = w, y0 = h, x1 = 0, y1 = 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (m[y * w + x]) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  const g = { x: (x0 + x1 + 1) / 2 / f - M, y: (y0 + y1 + 1) / 2 / f - M, w: (x1 - x0 + 1) / f + 2 * b, h: (y1 - y0 + 1) / f + 2 * b };
+  if (shape === 'square') g.w = g.h = Math.max(g.w, g.h);
+  return g;
+}
+// 塗られた画素の凸包（Andrew の単調連鎖法）。各行の左端・右端だけ見れば十分
+function hull(m, w, h) {
+  const pts = [];
+  for (let y = 0; y < h; y++) {
+    let a = -1, b = -1;
+    for (let x = 0; x < w; x++) if (m[y * w + x]) { if (a < 0) a = x; b = x; }
+    if (a >= 0) { pts.push([a, y], [a, y + 1], [b + 1, y], [b + 1, y + 1]); }
+  }
+  pts.sort((p, q) => p[0] - q[0] || p[1] - q[1]);
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lo = [], up = [];
+  for (const p of pts) { while (lo.length >= 2 && cross(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); }
+  for (const p of pts.reverse()) { while (up.length >= 2 && cross(up[up.length - 2], up[up.length - 1], p) <= 0) up.pop(); up.push(p); }
+  return lo.slice(0, -1).concat(up.slice(0, -1));
+}
+// 最小包含円（Welzl の逐次版）
+function minCircle(pts) {
+  pts = pts.slice().sort(() => Math.random() - 0.5);
+  const inside = (c, p) => Math.hypot(p[0] - c.x, p[1] - c.y) <= c.r + 1e-7;
+  const two = (a, b) => ({ x: (a[0] + b[0]) / 2, y: (a[1] + b[1]) / 2, r: Math.hypot(a[0] - b[0], a[1] - b[1]) / 2 });
+  const three = (a, b, c) => {
+    const d = 2 * (a[0] * (b[1] - c[1]) + b[0] * (c[1] - a[1]) + c[0] * (a[1] - b[1]));
+    if (Math.abs(d) < 1e-12) { const cs = [two(a, b), two(a, c), two(b, c)]; return cs.reduce((p, q) => (q.r > p.r ? q : p)); }
+    const A = a[0] ** 2 + a[1] ** 2, B = b[0] ** 2 + b[1] ** 2, C = c[0] ** 2 + c[1] ** 2;
+    const x = (A * (b[1] - c[1]) + B * (c[1] - a[1]) + C * (a[1] - b[1])) / d;
+    const y = (A * (c[0] - b[0]) + B * (a[0] - c[0]) + C * (b[0] - a[0])) / d;
+    return { x, y, r: Math.hypot(a[0] - x, a[1] - y) };
+  };
+  let c = { x: 0, y: 0, r: -1 };
+  for (let i = 0; i < pts.length; i++) {
+    if (inside(c, pts[i])) continue;
+    c = { x: pts[i][0], y: pts[i][1], r: 0 };
+    for (let j = 0; j < i; j++) {
+      if (inside(c, pts[j])) continue;
+      c = two(pts[i], pts[j]);
+      for (let k = 0; k < j; k++) if (!inside(c, pts[k])) c = three(pts[i], pts[j], pts[k]);
+    }
+  }
+  return c;
+}
+function maskCanvas(mk, rgba) {
+  const c = new OffscreenCanvas(mk.w, mk.h), x = c.getContext('2d'), im = x.createImageData(mk.w, mk.h);
+  for (let i = 0; i < mk.m.length; i++) if (mk.m[i]) im.data.set(rgba, i * 4);
+  x.putImageData(im, 0, 0); return c;
+}
+
+// ---------- overlap check ----------
+function overlaps() {
+  const f = 0.25, w = Math.round(CW * f), h = Math.round(CH * f), ms = {};
+  for (const it of layout) {
+    const c = new OffscreenCanvas(w, h), x = c.getContext('2d');
+    drawItem(x, it, assets[it.name].body, f);
+    const px = x.getImageData(0, 0, w, h).data, m = new Uint8Array(w * h);
+    for (let i = 0; i < m.length; i++) m[i] = px[i * 4 + 3] > 128;
+    ms[it.name] = m;
+  }
+  const pairs = [], names = layout.map(i => i.name);
+  for (let a = 0; a < names.length; a++) for (let b = a + 1; b < names.length; b++) {
+    const A = ms[names[a]], B = ms[names[b]];
+    for (let i = 0; i < A.length; i++) if (A[i] && B[i]) { pairs.push([names[a], names[b]]); break; }
+  }
+  return pairs;
+}
+
+// ---------- render ----------
+const view = document.getElementById('view'), vctx = view.getContext('2d');
+let borderCache = null, bad = new Set(), timer = null, lastGeom = null;
+function refresh() {
+  render();
+  clearTimeout(timer);
+  timer = setTimeout(() => {
+    $('empty').style.display = layout.length ? 'none' : '';
+    if (!layout.length) {  // 画像がないときは台紙も計算しない
+      bad = new Set(); borderCache = null; lastGeom = null;
+      $('overlap').textContent = $('center').textContent = $('overflow').textContent = '';
+      renderLayers(); render(); save();
+      return;
+    }
+    const pairs = overlaps();
+    bad = new Set(pairs.flat());
+    const el = document.getElementById('overlap');
+    el.className = 'status ' + (pairs.length ? 'ng' : 'ok');
+    el.textContent = pairs.length ? '本体が重なっています：' + pairs.map(p => p.join(' × ')).join('、') : '本体どうしの重なりはありません';
+    // 台紙は表示しないときも中心を求めるために計算する
+    const mk = stickerMask(0.4);
+    borderCache = { fill: maskCanvas(mk, [255, 255, 255, 255]), line: maskCanvas(mk, [0, 0, 0, 255]), mk, center: maskCenter(mk, 0.4) };
+    lastGeom = mk.geom || null;
+    syncSheet(mk);
+    const c = borderCache.center;
+    $('center').textContent = c ? `ステッカーの中心：x ${Math.round(c.x)}, y ${Math.round(c.y)}（${Math.round(c.w)} × ${Math.round(c.h)} px）` : '';
+    renderLayers(); render(); save();
+  }, 120);
+}
+// 台紙の外接矩形の中心（円なら円の中心）をキャンバス座標で返す
+function maskCenter(mk, f) {
+  let x0 = mk.w, y0 = mk.h, x1 = -1, y1 = -1;
+  for (let y = 0; y < mk.h; y++) for (let x = 0; x < mk.w; x++) if (mk.m[y * mk.w + x]) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  if (x1 < 0) return null;
+  return { x: (x0 + x1 + 1) / 2 / f - M, y: (y0 + y1 + 1) / 2 / f - M, w: (x1 - x0 + 1) / f, h: (y1 - y0 + 1) / f };
+}
+// グリッドはステッカーの中心を原点にして引く（中心線は赤、5本ごとに少し濃く）
+function drawGrid() {
+  const c = borderCache && borderCache.center;
+  if (!settings.grid || !c) return;
+  const step = Math.max(10, settings.gridStep), x0 = -M, x1 = CW + M, y0 = -M, y1 = CH + M;
+  vctx.save(); vctx.lineWidth = 2;
+  for (const axis of ['x', 'y']) {
+    const o = c[axis], lo = axis === 'x' ? x0 : y0, hi = axis === 'x' ? x1 : y1;
+    for (let k = Math.ceil((lo - o) / step); o + k * step <= hi; k++) {
+      if (k === 0) continue;
+      const v = o + k * step;
+      vctx.strokeStyle = k % 5 === 0 ? 'rgba(10,45,146,.45)' : 'rgba(10,45,146,.18)';
+      vctx.beginPath();
+      if (axis === 'x') { vctx.moveTo(v, y0); vctx.lineTo(v, y1); } else { vctx.moveTo(x0, v); vctx.lineTo(x1, v); }
+      vctx.stroke();
+    }
+  }
+  vctx.strokeStyle = '#e60012'; vctx.lineWidth = 4; vctx.setLineDash([24, 12]);
+  vctx.beginPath(); vctx.moveTo(c.x, y0); vctx.lineTo(c.x, y1); vctx.moveTo(x0, c.y); vctx.lineTo(x1, c.y); vctx.stroke();
+  vctx.setLineDash([]); vctx.fillStyle = '#e60012';
+  vctx.beginPath(); vctx.arc(c.x, c.y, 12, 0, 2 * Math.PI); vctx.fill();
+  vctx.restore();
+}
+function render() {
+  vctx.setTransform(1, 0, 0, 1, 0, 0);
+  vctx.clearRect(0, 0, VW, VH);
+  if (settings.showBorder !== false && borderCache) {
+    vctx.imageSmoothingEnabled = true;
+    // カット線：黒い台紙を少しずつずらして描いてから白い台紙を重ね、外側に黒い縁を残す
+    const t = 6;
+    for (let k = 0; k < 16; k++) {
+      const a = k * Math.PI / 8;
+      vctx.drawImage(borderCache.line, t * Math.cos(a), t * Math.sin(a), VW, VH);
+    }
+    vctx.drawImage(borderCache.fill, 0, 0, VW, VH);
+  }
+  vctx.setTransform(1, 0, 0, 1, M, M);  // 以降はキャンバス座標（JSON の x, y と同じ）
+  for (const it of layout) drawItem(vctx, it, assets[it.name].img);
+  drawGrid();
+  for (const it of layout) {
+    if (it !== sel && !bad.has(it.name)) continue;
+    const d = assets[it.name];
+    vctx.save(); place(vctx, it);
+    vctx.lineWidth = 4 / it.scale;
+    vctx.setLineDash([16 / it.scale, 10 / it.scale]);
+    vctx.strokeStyle = bad.has(it.name) ? '#d92d20' : '#0A2D92';
+    vctx.strokeRect(-d.w / 2, -d.h / 2, d.w, d.h);
+    vctx.restore();
+  }
+}
+function renderLayers() {
+  const ul = document.getElementById('layers'); ul.innerHTML = '';
+  [...layout].reverse().forEach(it => {
+    const li = document.createElement('li');
+    li.className = it === sel ? 'sel' : '';
+    const name = document.createElement('span');
+    name.textContent = it.name + (it.link ? ' 🔗' : '');
+    li.appendChild(name);
+    if (bad.has(it.name)) li.insertAdjacentHTML('beforeend', '<span class="bad">重なり</span>');
+    li.onclick = () => { sel = it; syncUI(); render(); renderLayers(); };
+    ul.appendChild(li);
+  });
+}
+
+// ---------- UI ----------
+const $ = id => document.getElementById(id);
+function syncUI() {
+  $('selname').textContent = sel ? sel.name : '—';
+  for (const id of ['scaleR', 'scaleN', 'rotR', 'rotN', 'xN', 'yN', 'front', 'up', 'down', 'back', 'link', 'denoise', 'dup', 'del']) $(id).disabled = !sel;
+  for (const el of document.querySelectorAll('input[name=bodyMode]')) { el.disabled = !sel; el.checked = !!sel && el.value === assets[sel.name].opts.body; }
+  if (sel) {
+    $('scaleR').value = $('scaleN').value = sel.scale;
+    $('rotR').value = $('rotN').value = sel.rot;
+    $('xN').value = Math.round(sel.x); $('yN').value = Math.round(sel.y);
+    $('link').checked = !!sel.link;
+    $('denoise').checked = assets[sel.name].opts.denoise;
+  }
+  $('canvasW').value = CW; $('canvasH').value = CH;
+  $('borderR').value = $('borderN').value = settings.border;
+  $('cornerR').value = $('cornerN').value = settings.corner;
+  for (const el of document.querySelectorAll('input[name=shape]')) el.checked = el.value === (settings.shape || 'contour');
+  $('cornerRow').style.display = ['rect', 'square'].includes(settings.shape) ? '' : 'none';
+  const contour = (settings.shape || 'contour') === 'contour', manual = settings.sheetMode === 'manual';
+  $('sheetBox').style.display = contour ? 'none' : '';
+  $('borderRow').style.display = contour || !manual ? '' : 'none';
+  for (const el of document.querySelectorAll('input[name=sheetMode]')) el.checked = el.value === settings.sheetMode;
+  $('sheetWLabel').textContent = { circle: '直径', square: '一辺', rect: '幅' }[settings.shape] || '幅';
+  $('sheetHRow').style.display = settings.shape === 'rect' ? '' : 'none';
+  $('sheetHint').textContent = manual ? '中心と大きさを数値で指定します。' : '中身に合わせて自動で決まります。数値を書き換えると手動になります。';
+  $('widthCm').value = settings.widthCm;
+  $('showBorder').checked = settings.showBorder !== false;
+  $('showGrid').checked = !!settings.grid;
+  $('gridR').value = $('gridN').value = settings.gridStep;
+  $('gridRow').style.display = settings.grid ? '' : 'none';
+  $('json').value = exportText();
+  renderLayers();
+}
+// 「倍率を連動する」にチェックした画像どうしは、どれかの倍率を変えると全部同じ倍率になる
+function setScale(v) {
+  v = Math.max(0.01, Math.min(10, +(+v).toFixed(3)));
+  if (sel.link) layout.forEach(it => { if (it.link) it.scale = v; });
+  else sel.scale = v;
+}
+const changed = () => { syncUI(); refresh(); };
+$('scaleR').oninput = e => { setScale(e.target.value); changed(); };
+$('scaleN').onchange = e => { setScale(e.target.value); changed(); };
+$('rotR').oninput = e => { sel.rot = +e.target.value; changed(); };
+$('rotN').onchange = e => { sel.rot = +e.target.value; changed(); };
+$('xN').onchange = e => { sel.x = +e.target.value; changed(); };
+$('link').onchange = e => { sel.link = e.target.checked; changed(); };
+// ノイズ除去・重なり判定の範囲を変えたら、元画像から作り直す
+async function setOpts(patch) {
+  const it = sel, a = assets[it.name];
+  try { await setAsset(it.name, a.src, { ...a.opts, ...patch }); } catch (e) { toast(e.message); }
+  changed();
+}
+$('denoise').onchange = e => setOpts({ denoise: e.target.checked });
+for (const el of document.querySelectorAll('input[name=bodyMode]')) el.onchange = e => setOpts({ body: e.target.value });
+$('dup').onclick = () => {
+  const name = uniqueName(sel.name), a = assets[sel.name];
+  assets[name] = { ...a }; idbPut({ name, src: a.src, opts: a.opts });
+  const it = { ...sel, name, x: sel.x + 40, y: sel.y + 40 };
+  layout.splice(layout.indexOf(sel) + 1, 0, it); sel = it; changed();
+};
+function removeSel() {
+  layout.splice(layout.indexOf(sel), 1); removeAsset(sel.name); sel = null; changed();
+}
+$('del').onclick = removeSel;
+$('canvasW').onchange = e => { setCanvas(+e.target.value, CH); changed(); };
+$('canvasH').onchange = e => { setCanvas(CW, +e.target.value); changed(); };
+$('yN').onchange = e => { sel.y = +e.target.value; changed(); };
+$('borderR').oninput = $('borderN').onchange = e => { settings.border = +e.target.value; changed(); };
+$('cornerR').oninput = $('cornerN').onchange = e => { settings.corner = +e.target.value; changed(); };
+for (const el of document.querySelectorAll('input[name=shape]')) el.onchange = e => {
+  settings.shape = e.target.value;
+  const g = settings.sheet;
+  if (g && ['circle', 'square'].includes(settings.shape)) g.w = g.h = Math.max(g.w, g.h);  // 円・正方形は縦横を同じに
+  changed();
+};
+// 欄の表示：手動なら設定値、自動なら直近に計算した台紙
+function syncSheet(mk) {
+  const g = settings.sheetMode === 'manual' && settings.sheet ? settings.sheet : (mk && mk.geom);
+  if (g) for (const [id, v] of [['sheetX', g.x], ['sheetY', g.y], ['sheetW', g.w], ['sheetH', g.h]]) if (document.activeElement !== $(id)) $(id).value = Math.round(v);
+  $('overflow').textContent = mk && mk.overflow ? '中身が台紙からはみ出しています' : '';
+  if (document.activeElement !== $('json')) $('json').value = exportText();
+}
+function toManual() {
+  if (settings.sheetMode !== 'manual' || !settings.sheet) {
+    const g = lastGeom || { x: CW / 2, y: CH / 2, w: 1000, h: 1000 };
+    settings.sheet = { x: Math.round(g.x), y: Math.round(g.y), w: Math.round(g.w), h: Math.round(g.h) };
+  }
+  settings.sheetMode = 'manual';
+}
+for (const el of document.querySelectorAll('input[name=sheetMode]')) el.onchange = e => {
+  if (e.target.value === 'manual') toManual(); else settings.sheetMode = 'auto';
+  changed();
+};
+for (const [id, key] of [['sheetX', 'x'], ['sheetY', 'y'], ['sheetW', 'w'], ['sheetH', 'h']]) $(id).onchange = e => {
+  toManual();
+  settings.sheet[key] = +e.target.value;
+  if (key === 'w' && settings.shape !== 'rect') settings.sheet.h = settings.sheet.w;
+  changed();
+};
+$('widthCm').onchange = e => { settings.widthCm = +e.target.value; changed(); };
+$('showBorder').onchange = e => { settings.showBorder = e.target.checked; changed(); };
+$('showGrid').onchange = e => { settings.grid = e.target.checked; changed(); };
+$('gridR').oninput = $('gridN').onchange = e => { settings.gridStep = +e.target.value; changed(); };
+function move(to) {
+  const i = layout.indexOf(sel); layout.splice(i, 1);
+  const j = to === 'front' ? layout.length : to === 'back' ? 0 : Math.max(0, Math.min(layout.length, i + (to === 'up' ? 1 : -1)));
+  layout.splice(j, 0, sel); changed();
+}
+for (const k of ['front', 'up', 'down', 'back']) $(k).onclick = () => move(k);
+
+// ドラッグ・ホイール
+const toCanvas = e => { const r = view.getBoundingClientRect(); return [(e.clientX - r.left) * VW / r.width - M, (e.clientY - r.top) * VH / r.height - M]; };
+let drag = null;
+view.addEventListener('pointerdown', e => {
+  const [x, y] = toCanvas(e); const it = hit(x, y);
+  sel = it; syncUI(); render();
+  if (it) { drag = { it, dx: x - it.x, dy: y - it.y }; view.setPointerCapture(e.pointerId); }
+});
+view.addEventListener('pointermove', e => {
+  const [x, y] = toCanvas(e);
+  if (drag) { drag.it.x = Math.round(x - drag.dx); drag.it.y = Math.round(y - drag.dy); $('xN').value = drag.it.x; $('yN').value = drag.it.y; refresh(); }
+  else view.style.cursor = hit(x, y) ? 'grab' : 'default';
+});
+view.addEventListener('pointerup', () => { if (drag) { drag = null; changed(); } });
+view.addEventListener('wheel', e => {
+  if (!sel) return; e.preventDefault();
+  if (e.shiftKey) sel.rot = Math.round(sel.rot + Math.sign(e.deltaY || e.deltaX));
+  else setScale(sel.scale * (e.deltaY > 0 ? 0.98 : 1.02));
+  changed();
+}, { passive: false });
+window.addEventListener('keydown', e => {
+  if (!sel || ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+  if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); removeSel(); return; }
+  const s = e.shiftKey ? 10 : 1, k = { ArrowLeft: [-s, 0], ArrowRight: [s, 0], ArrowUp: [0, -s], ArrowDown: [0, s] }[e.key];
+  if (k) { e.preventDefault(); sel.x += k[0]; sel.y += k[1]; changed(); }
+});
+
+// ---------- export / import ----------
+function exportText() {
+  const rows = layout.map(it => {
+    const o = assets[it.name].opts;
+    return `    {"name": ${JSON.stringify(it.name)}, "x": ${Math.round(it.x)}, "y": ${Math.round(it.y)}, "scale": ${+it.scale.toFixed(3)}, "rot": ${+(+it.rot).toFixed(1)}, "denoise": ${o.denoise}, "body": "${o.body}"` + (it.link ? ', "link": true}' : '}');
+  });
+  const shape = settings.shape || 'contour', r = v => Math.round(v);
+  let sheet;
+  if (shape === 'contour') sheet = { shape, margin: settings.border };
+  else {
+    const manual = settings.sheetMode === 'manual' && settings.sheet, g = manual ? settings.sheet : (lastGeom || { x: 0, y: 0, w: 0, h: 0 });
+    sheet = { shape, mode: manual ? 'manual' : 'auto' };
+    if (!manual) sheet.margin = settings.border;
+    sheet.x = r(g.x); sheet.y = r(g.y);
+    if (shape === 'circle') sheet.diameter = r(g.w);
+    else if (shape === 'square') sheet.size = r(g.w);
+    else { sheet.width = r(g.w); sheet.height = r(g.h); }
+    if (shape !== 'circle') sheet.corner = settings.corner;
+  }
+  return '```json\n{\n  "canvas": [' + CW + ', ' + CH + '],\n  "width_cm": ' + settings.widthCm + ',\n  "sheet": ' + JSON.stringify(sheet).replace(/,"/g, ', "').replace(/":/g, '": ') +
+    ',\n  "note": "layout は描く順（後ろほど手前）。x,y は中心、rot は反時計回りの度数（PIL の rotate と同じ）。sheet は台紙（contour=輪郭に沿った白ふち、circle/rect/square は x,y が中心、auto のときの値は中身から自動計算した結果）。name は画像の名前（画像そのものは含まない）。denoise は透過部分のノイズ除去、body は重なり判定の範囲（whole=全体、main=一番大きい塊と上の飾り）",\n  "layout": [\n' + rows.join(',\n') + '\n  ]\n}\n```';
+}
+const toast = msg => { const t = $('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 1600); };
+$('copy').onclick = async () => {
+  const text = exportText(); $('json').value = text;
+  try { await navigator.clipboard.writeText(text); toast('コピーしました。Claude に貼り付けてください'); }
+  catch (e) { $('json').select(); toast('下の欄を選択しました。⌘C でコピーしてください'); }
+};
+// 配置の JSON を反映する。画像は name で今ある画像に結びつけ、無いものは読み飛ばす
+async function loadLayout(obj) {
+  if (!Array.isArray(obj.layout)) throw new Error('layout がありません');
+  const missing = obj.layout.filter(it => !assets[it.name]).map(it => it.name);
+  for (const it of obj.layout) {
+    const a = assets[it.name];
+    if (!a) continue;
+    const opts = { denoise: it.denoise ?? a.opts.denoise, body: it.body ?? a.opts.body };
+    if (opts.denoise !== a.opts.denoise || opts.body !== a.opts.body) await setAsset(it.name, a.src, opts);
+  }
+  layout = obj.layout.filter(it => assets[it.name]).map(it => ({ name: it.name, x: +it.x, y: +it.y, scale: +it.scale, rot: +it.rot, link: !!it.link }));
+  if (Array.isArray(obj.canvas)) setCanvas(+obj.canvas[0], +obj.canvas[1]);
+  if (obj.width_cm != null) settings.widthCm = +obj.width_cm;
+  const sh = obj.sheet;
+  if (sh) {
+    settings.shape = sh.shape || 'contour';
+    if (sh.margin != null) settings.border = +sh.margin;
+    if (sh.corner != null) settings.corner = +sh.corner;
+    settings.sheetMode = sh.mode === 'manual' ? 'manual' : 'auto';
+    if (settings.shape !== 'contour' && sh.x != null) {
+      const w = +(sh.diameter ?? sh.size ?? sh.width), h = +(sh.diameter ?? sh.size ?? sh.height);
+      settings.sheet = { x: +sh.x, y: +sh.y, w, h };
+    }
+  } else {  // 以前の形式（border / shape / corner が直下にある）
+    if (obj.border != null) settings.border = +obj.border;
+    if (obj.shape) settings.shape = obj.shape;
+    if (obj.corner != null) settings.corner = +obj.corner;
+    settings.sheetMode = 'auto';
+  }
+  sel = null; changed();
+  return missing;
+}
+$('apply').onclick = async () => {
+  try {
+    const missing = await loadLayout(JSON.parse($('json').value.replace(/```(json)?/g, '')));
+    toast(missing.length ? `読み込みました（画像がないもの：${missing.join('、')}）` : '読み込みました');
+  } catch (e) { toast('読み込めませんでした：' + e.message); }
+};
+
+// プロジェクトファイル：配置の JSON に images（name → 元画像の data URL）を足したもの。render_layout.py でもそのまま読める
+$('saveProj').onclick = () => {
+  const obj = JSON.parse(exportText().replace(/```(json)?/g, ''));
+  obj.images = Object.fromEntries(layout.map(it => [it.name, assets[it.name].src]));
+  download(new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' }), 'sticker-project.json');
+};
+// 開くと、今の画像と配置はプロジェクトの内容に置き換わる
+async function loadProject(text) {
+  try {
+    const obj = JSON.parse(text.replace(/```(json)?/g, ''));
+    if (!obj.images) throw new Error('images がありません（配置だけの JSON は下の欄に貼って「テキストの配置を読み込む」を使ってください）');
+    for (const it of layout) removeAsset(it.name);
+    layout = [];
+    const rows = Object.fromEntries((obj.layout || []).map(it => [it.name, it]));
+    for (const [name, src] of Object.entries(obj.images)) {
+      const r = rows[name] || {};
+      await setAsset(name, src, { denoise: r.denoise ?? DEFAULT_OPTS.denoise, body: r.body ?? DEFAULT_OPTS.body });
+    }
+    await loadLayout(obj);
+    toast('プロジェクトを開きました');
+  } catch (e) { toast('開けませんでした：' + e.message); }
+}
+$('loadProj').onclick = () => $('fileProj').click();
+$('fileProj').onchange = async e => { if (e.target.files[0]) await loadProject(await e.target.files[0].text()); e.target.value = ''; };
+$('add').onclick = $('addEmpty').onclick = () => $('fileImg').click();
+$('fileImg').onchange = async e => { await addFiles([...e.target.files]); e.target.value = ''; };
+$('clear').onclick = () => {
+  if (!layout.length || !confirm('すべての画像と配置を削除します。よろしいですか？')) return;
+  for (const it of layout) removeAsset(it.name);
+  layout = []; sel = null; changed();
+};
+// ステージへのドラッグ＆ドロップ
+const stage = $('stage');
+stage.addEventListener('dragover', e => { e.preventDefault(); stage.classList.add('drop'); });
+stage.addEventListener('dragleave', e => { if (!stage.contains(e.relatedTarget)) stage.classList.remove('drop'); });
+stage.addEventListener('drop', e => { e.preventDefault(); stage.classList.remove('drop'); addFiles([...e.dataTransfer.files]); });
+function download(blob, filename) {
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob); link.download = filename; link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+// PNG：ふちをフル解像度で計算 → 余白 PAD で切り抜き → 横幅 widthCm（300dpi）に縮小 → pHYs で dpi を埋め込む
+$('png').onclick = async () => {
+  if (!layout.length) { toast('画像がありません'); return; }
+  toast('書き出し中…');
+  await new Promise(r => setTimeout(r, 30));
+  const mk = stickerMask(1);
+  const blurred = new OffscreenCanvas(VW, VH), bx = blurred.getContext('2d');
+  bx.filter = 'blur(4px)'; bx.drawImage(maskCanvas(mk, [255, 255, 255, 255]), 0, 0);
+  const a = bx.getImageData(0, 0, VW, VH).data, m = new Uint8Array(VW * VH);
+  for (let i = 0; i < m.length; i++) m[i] = a[i * 4 + 3] > 127;
+  let x0 = VW, y0 = VH, x1 = 0, y1 = 0;
+  for (let y = 0; y < VH; y++) for (let x = 0; x < VW; x++) if (m[y * VW + x]) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  const full = new OffscreenCanvas(VW, VH), fx = full.getContext('2d');
+  fx.drawImage(maskCanvas({ m, w: VW, h: VH }, [255, 255, 255, 255]), 0, 0);
+  fx.translate(M, M);
+  for (const it of layout) drawItem(fx, it, assets[it.name].img);
+  // 台紙の外にはみ出した部分は切り落とす（実物もカット線で切られる）
+  fx.setTransform(1, 0, 0, 1, 0, 0);
+  fx.globalCompositeOperation = 'destination-in';
+  fx.drawImage(maskCanvas({ m, w: VW, h: VH }, [255, 255, 255, 255]), 0, 0);
+  fx.globalCompositeOperation = 'source-over';
+  x0 -= PAD; y0 -= PAD; x1 += PAD; y1 += PAD;
+  const cw = x1 - x0 + 1, ch = y1 - y0 + 1;
+  const tw = Math.round(settings.widthCm / 2.54 * DPI), th = Math.round(ch * tw / cw);
+  const out = new OffscreenCanvas(tw, th), ox = out.getContext('2d');
+  ox.imageSmoothingQuality = 'high'; ox.drawImage(full, x0, y0, cw, ch, 0, 0, tw, th);
+  const blob = await withDpi(await out.convertToBlob({ type: 'image/png' }), DPI);
+  download(blob, 'sticker.png');
+  toast(`保存しました（${settings.widthCm} × ${(th / DPI * 2.54).toFixed(1)} cm）`);
+};
+// PNG に pHYs チャンクを足して dpi を記録する（印刷所でサイズが正しく読まれるように）
+async function withDpi(blob, dpi) {
+  const buf = new Uint8Array(await blob.arrayBuffer()), ppm = Math.round(dpi / 0.0254);
+  const chunk = new Uint8Array(21), dv = new DataView(chunk.buffer);
+  dv.setUint32(0, 9); chunk.set([112, 72, 89, 115], 4); dv.setUint32(8, ppm); dv.setUint32(12, ppm); chunk[16] = 1;
+  dv.setUint32(17, crc32(chunk.subarray(4, 17)));
+  const at = 33; // 8(シグネチャ) + 25(IHDR)
+  const out = new Uint8Array(buf.length + 21);
+  out.set(buf.subarray(0, at)); out.set(chunk, at); out.set(buf.subarray(at), at + 21);
+  return new Blob([out], { type: 'image/png' });
+}
+function crc32(bytes) {
+  let c, crc = 0xffffffff;
+  for (const b of bytes) { c = (crc ^ b) & 0xff; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; crc = (crc >>> 8) ^ c; }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+init();
+</script>
+</body>
+</html>
